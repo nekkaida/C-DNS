@@ -123,8 +123,8 @@ int main() {
         response_header.ra = 0;     // Recursion not available
         response_header.z = 0;      // Reserved bits
         response_header.rcode = 0;  // No error
-        response_header.qdcount = 1; // Include 1 question - this is updated from 0
-        response_header.ancount = 0;
+        response_header.qdcount = 1; // Include 1 question
+        response_header.ancount = 1; // Include 1 answer (NEW - updated from 0)
         response_header.nscount = 0;
         response_header.arcount = 0;
         
@@ -132,9 +132,7 @@ int main() {
         struct dns_header network_response_header = response_header;
         dns_header_to_network(&network_response_header);
         
-        // Create response packet
-        // 12 bytes for header + length for question section
-        // For the test, we're using a specific hardcoded question
+        // Question section (same as before)
         unsigned char question[] = {
             0x0c, 'c', 'o', 'd', 'e', 'c', 'r', 'a', 'f', 't', 'e', 'r', 's', // label "codecrafters" (length 12)
             0x02, 'i', 'o',                                                   // label "io" (length 2)
@@ -143,8 +141,42 @@ int main() {
             0x00, 0x01                                                        // QCLASS = 1 (IN class)
         };
         
+        // NEW: Answer section
+        // Name field - same domain as in question
+        unsigned char answer_name[] = {
+            0x0c, 'c', 'o', 'd', 'e', 'c', 'r', 'a', 'f', 't', 'e', 'r', 's', // label "codecrafters" (length 12)
+            0x02, 'i', 'o',                                                   // label "io" (length 2)
+            0x00                                                              // null byte to terminate domain name
+        };
+        
+        // Type = 1 (A record), in network byte order
+        uint16_t answer_type = htons(1);
+        
+        // Class = 1 (IN class), in network byte order
+        uint16_t answer_class = htons(1);
+        
+        // TTL = 60 seconds, in network byte order
+        uint32_t answer_ttl = htonl(60);
+        
+        // Data length = 4 bytes (for IPv4 address), in network byte order
+        uint16_t answer_length = htons(4);
+        
+        // IP address 8.8.8.8 in network byte order
+        uint32_t answer_ip = inet_addr("8.8.8.8");
+        
+        // Calculate total response length
         size_t question_len = sizeof(question);
-        size_t response_len = sizeof(network_response_header) + question_len;
+        size_t answer_name_len = sizeof(answer_name);
+        size_t answer_type_len = sizeof(answer_type);
+        size_t answer_class_len = sizeof(answer_class);
+        size_t answer_ttl_len = sizeof(answer_ttl);
+        size_t answer_length_len = sizeof(answer_length);
+        size_t answer_ip_len = sizeof(answer_ip);
+        
+        size_t answer_section_len = answer_name_len + answer_type_len + answer_class_len + 
+                                    answer_ttl_len + answer_length_len + answer_ip_len;
+        
+        size_t response_len = sizeof(network_response_header) + question_len + answer_section_len;
         unsigned char response[response_len];
         
         // Copy header to response
@@ -153,12 +185,38 @@ int main() {
         // Copy question to response
         memcpy(response + sizeof(network_response_header), question, question_len);
         
+        // Copy answer section to response
+        size_t answer_offset = sizeof(network_response_header) + question_len;
+        
+        // Copy the name field
+        memcpy(response + answer_offset, answer_name, answer_name_len);
+        answer_offset += answer_name_len;
+        
+        // Copy the type field
+        memcpy(response + answer_offset, &answer_type, answer_type_len);
+        answer_offset += answer_type_len;
+        
+        // Copy the class field
+        memcpy(response + answer_offset, &answer_class, answer_class_len);
+        answer_offset += answer_class_len;
+        
+        // Copy the TTL field
+        memcpy(response + answer_offset, &answer_ttl, answer_ttl_len);
+        answer_offset += answer_ttl_len;
+        
+        // Copy the data length field
+        memcpy(response + answer_offset, &answer_length, answer_length_len);
+        answer_offset += answer_length_len;
+        
+        // Copy the IP address field
+        memcpy(response + answer_offset, &answer_ip, answer_ip_len);
+        
         // Send response
         if (sendto(udpSocket, response, response_len, 0, 
                   (struct sockaddr*)&clientAddress, sizeof(clientAddress)) == -1) {
             perror("Failed to send response");
         } else {
-            printf("Sent DNS response with ID: %d and question section\n", response_header.id);
+            printf("Sent DNS response with ID: %d, question section, and answer section\n", response_header.id);
         }
     }
     
