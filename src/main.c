@@ -140,23 +140,37 @@ int main() {
         struct dns_header network_response_header = response_header;
         dns_header_to_network(&network_response_header);
         
-        // Question section (same as before)
-        unsigned char question[] = {
-            0x0c, 'c', 'o', 'd', 'e', 'c', 'r', 'a', 'f', 't', 'e', 'r', 's', // label "codecrafters" (length 12)
-            0x02, 'i', 'o',                                                   // label "io" (length 2)
-            0x00,                                                             // null byte to terminate domain name
-            0x00, 0x01,                                                       // QTYPE = 1 (A record)
-            0x00, 0x01                                                        // QCLASS = 1 (IN class)
-        };
+        // Parse the question section from the incoming query
+        unsigned char *question_ptr = buffer + sizeof(struct dns_header);
+        unsigned char *question_start = question_ptr; // Save starting position for copying later
         
-        // NEW: Answer section
-        // Name field - same domain as in question
-        unsigned char answer_name[] = {
-            0x0c, 'c', 'o', 'd', 'e', 'c', 'r', 'a', 'f', 't', 'e', 'r', 's', // label "codecrafters" (length 12)
-            0x02, 'i', 'o',                                                   // label "io" (length 2)
-            0x00                                                              // null byte to terminate domain name
-        };
+        // Extract the domain name
+        printf("Parsing domain name from question section\n");
         
+        // Skip through the domain name labels
+        while (*question_ptr != 0) {
+            uint8_t label_length = *question_ptr;
+            question_ptr += label_length + 1; // Move past label and its length byte
+        }
+        question_ptr++; // Skip the terminating null byte
+        
+        // Extract QTYPE and QCLASS (both 2 bytes each)
+        uint16_t qtype, qclass;
+        memcpy(&qtype, question_ptr, sizeof(qtype));
+        question_ptr += sizeof(qtype);
+        memcpy(&qclass, question_ptr, sizeof(qclass));
+        question_ptr += sizeof(qclass);
+        
+        // Convert from network byte order
+        qtype = ntohs(qtype);
+        qclass = ntohs(qclass);
+        
+        printf("Parsed question section: TYPE=%d, CLASS=%d\n", qtype, qclass);
+        
+        // Calculate question section length
+        size_t question_len = question_ptr - question_start;
+        
+        // Prepare the answer section using the same domain name from the question
         // Type = 1 (A record), in network byte order
         uint16_t answer_type = htons(1);
         
@@ -172,17 +186,16 @@ int main() {
         // IP address 8.8.8.8 in network byte order
         uint32_t answer_ip = inet_addr("8.8.8.8");
         
-        // Calculate total response length
-        size_t question_len = sizeof(question);
-        size_t answer_name_len = sizeof(answer_name);
-        size_t answer_type_len = sizeof(answer_type);
-        size_t answer_class_len = sizeof(answer_class);
-        size_t answer_ttl_len = sizeof(answer_ttl);
-        size_t answer_length_len = sizeof(answer_length);
-        size_t answer_ip_len = sizeof(answer_ip);
+        // Calculate the length of the domain name in the question (including terminating zero)
+        size_t domain_name_len = (question_start + question_len) - question_start - sizeof(qtype) - sizeof(qclass);
         
-        size_t answer_section_len = answer_name_len + answer_type_len + answer_class_len + 
-                                    answer_ttl_len + answer_length_len + answer_ip_len;
+        // Calculate total response length
+        size_t answer_section_len = domain_name_len + // Domain name from the question
+                               sizeof(answer_type) + 
+                               sizeof(answer_class) + 
+                               sizeof(answer_ttl) + 
+                               sizeof(answer_length) + 
+                               sizeof(answer_ip);
         
         size_t response_len = sizeof(network_response_header) + question_len + answer_section_len;
         unsigned char response[response_len];
@@ -190,34 +203,34 @@ int main() {
         // Copy header to response
         memcpy(response, &network_response_header, sizeof(network_response_header));
         
-        // Copy question to response
-        memcpy(response + sizeof(network_response_header), question, question_len);
+        // Copy question to response (exactly as received)
+        memcpy(response + sizeof(network_response_header), question_start, question_len);
         
         // Copy answer section to response
         size_t answer_offset = sizeof(network_response_header) + question_len;
         
-        // Copy the name field
-        memcpy(response + answer_offset, answer_name, answer_name_len);
-        answer_offset += answer_name_len;
+        // Copy the name field (domain name from the question)
+        memcpy(response + answer_offset, question_start, domain_name_len);
+        answer_offset += domain_name_len;
         
         // Copy the type field
-        memcpy(response + answer_offset, &answer_type, answer_type_len);
-        answer_offset += answer_type_len;
+        memcpy(response + answer_offset, &answer_type, sizeof(answer_type));
+        answer_offset += sizeof(answer_type);
         
         // Copy the class field
-        memcpy(response + answer_offset, &answer_class, answer_class_len);
-        answer_offset += answer_class_len;
+        memcpy(response + answer_offset, &answer_class, sizeof(answer_class));
+        answer_offset += sizeof(answer_class);
         
         // Copy the TTL field
-        memcpy(response + answer_offset, &answer_ttl, answer_ttl_len);
-        answer_offset += answer_ttl_len;
+        memcpy(response + answer_offset, &answer_ttl, sizeof(answer_ttl));
+        answer_offset += sizeof(answer_ttl);
         
         // Copy the data length field
-        memcpy(response + answer_offset, &answer_length, answer_length_len);
-        answer_offset += answer_length_len;
+        memcpy(response + answer_offset, &answer_length, sizeof(answer_length));
+        answer_offset += sizeof(answer_length);
         
         // Copy the IP address field
-        memcpy(response + answer_offset, &answer_ip, answer_ip_len);
+        memcpy(response + answer_offset, &answer_ip, sizeof(answer_ip));
         
         // Send response
         if (sendto(udpSocket, response, response_len, 0, 

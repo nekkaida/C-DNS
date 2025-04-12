@@ -67,3 +67,33 @@ This implementation completes stage 4 of the DNS server challenge,
 providing a working DNS responder for A record queries.
 
 Ref: RFC 1035 Section 4.1
+
+Changelog
+Added
+DNS header structure with bit field handling
+Question section parser with support for:
+Domain name label sequence parsing
+QTYPE (A record) handling
+QCLASS (IN) validation
+Answer section generator with:
+Matching domain name copying
+A record type (0x0001)
+IN class (0x0001)
+60-second TTL
+IPv4 address response (8.8.8.8)
+Network byte order handling functions
+Debug logging for packet parsing
+Modified
+Main UDP server loop to handle complete DNS messages
+Response construction with proper section alignment
+Memory management for dynamic response sizing
+Technical Details
+Implemented RFC 1035 Section 4.1.2 (Question Section Format)
+Implemented RFC 1035 Section 4.1.3 (Resource Record Format)
+Added proper byte alignment and endianness handling
+Buffer size calculations for all message sections
+Testing
+Verified with varying domain name lengths
+Validated network byte order conversion
+Confirmed proper section alignment
+Tested with standard A record queries
