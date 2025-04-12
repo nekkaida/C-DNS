@@ -110,21 +110,29 @@ int main() {
         // Convert header from network byte order
         dns_header_from_network(&query_header);
         
-        printf("Received DNS query with ID: %d\n", query_header.id);
+        printf("Received DNS query with ID: %d, OPCODE: %d, RD: %d\n", 
+               query_header.id, query_header.opcode, query_header.rd);
         
-        // Create response header with specified values
+        // Create response header with values from the request
         struct dns_header response_header = {0};
-        response_header.id = 1234;  // Expected value for testing
-        response_header.qr = 1;     // This is a response
-        response_header.opcode = 0; // Standard query
-        response_header.aa = 0;     // Not authoritative
-        response_header.tc = 0;     // Not truncated
-        response_header.rd = 0;     // Recursion not desired
-        response_header.ra = 0;     // Recursion not available
-        response_header.z = 0;      // Reserved bits
-        response_header.rcode = 0;  // No error
-        response_header.qdcount = 1; // Include 1 question
-        response_header.ancount = 1; // Include 1 answer (NEW - updated from 0)
+        response_header.id = query_header.id;  // Use the ID from the request
+        response_header.qr = 1;                // This is a response
+        response_header.opcode = query_header.opcode; // Use OPCODE from request
+        response_header.aa = 0;                // Not authoritative
+        response_header.tc = 0;                // Not truncated
+        response_header.rd = query_header.rd;  // Use RD from request
+        response_header.ra = 0;                // Recursion not available
+        response_header.z = 0;                 // Reserved bits
+        
+        // Set RCODE based on OPCODE
+        if (query_header.opcode == 0) {
+            response_header.rcode = 0;         // No error for standard query
+        } else {
+            response_header.rcode = 4;         // Not implemented for other opcodes
+        }
+        
+        response_header.qdcount = 1;           // Include 1 question
+        response_header.ancount = 1;           // Include 1 answer
         response_header.nscount = 0;
         response_header.arcount = 0;
         
