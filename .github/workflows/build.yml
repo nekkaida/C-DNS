@@ -11,9 +11,9 @@ jobs:
   build:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10  # Add timeout to prevent hanging builds
+    timeout-minutes: 10
     strategy:
-      fail-fast: false  # Continue with other builds if one fails
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         include:
@@ -45,6 +45,27 @@ jobs:
         brew update
         brew install gcc bind
 
+    - name: Fix newline issues for macOS
+      if: matrix.os == 'macos-latest'
+      run: |
+        # Create a script to fix newlines
+        cat > fix-newlines.sh << 'EOF'
+        #!/bin/bash
+        find . -name "*.c" -o -name "*.h" | while read file; do
+          # Check if file doesn't end with newline
+          if [ "$(tail -c 1 "$file" | wc -l)" -eq 0 ]; then
+            echo "Adding newline to $file"
+            echo "" >> "$file"
+          else
+            echo "$file already has a trailing newline"
+          fi
+        done
+        EOF
+        
+        # Make it executable and run it
+        chmod +x fix-newlines.sh
+        ./fix-newlines.sh
+
     - name: Build DNS server
       run: |
         make
@@ -53,8 +74,6 @@ jobs:
     - name: Run unit tests
       run: |
         make test || echo "No tests implemented yet"
-
-    # Memory check removed for now to simplify debug - can be added back later
 
     - name: Smoke test
       run: |
@@ -73,18 +92,12 @@ jobs:
           nslookup -port=2053 example.com 127.0.0.1
         fi
         
-        # Test single question query
-        echo "Testing single question query..."
-        
-        # Test multi-question query capability
-        echo "Testing multi-question capability..."
-        
         # Clean up
         kill $SERVER_PID || true
         echo "Server stopped"
 
     - name: Archive binary
-      uses: actions/upload-artifact@v4  # Updated to v4
+      uses: actions/upload-artifact@v4
       with:
         name: dns-server-${{ matrix.os }}
         path: dns-server

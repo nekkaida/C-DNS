@@ -124,8 +124,6 @@ int forward_query(int sock, const struct sockaddr_in *resolver,
 // Extract the answer section from a response
 void extract_answer(const unsigned char *response, int response_len, 
                    unsigned char *answer_buffer, int *answer_len) {
-    // Removed unused variable: const dns_header_t *header = (const dns_header_t*)response;
-    
     // Skip header
     const unsigned char *ptr = response + sizeof(dns_header_t);
     
