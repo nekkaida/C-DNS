@@ -1,348 +1,348 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
-#include <string.h>
-#include <errno.h>
-#include <unistd.h>
 #include <arpa/inet.h>
 
-// DNS header structure as per RFC 1035
-struct dns_header {
-    uint16_t id;      // Identification number
-    
-    // Flags packed in a single 16-bit value
-    uint8_t rd:1;     // Recursion Desired
-    uint8_t tc:1;     // Truncated Message
-    uint8_t aa:1;     // Authoritative Answer
-    uint8_t opcode:4; // Operation code
-    uint8_t qr:1;     // Query/Response Indicator
-    
-    uint8_t rcode:4;  // Response code
-    uint8_t z:3;      // Reserved for future use
-    uint8_t ra:1;     // Recursion Available
-    
-    uint16_t qdcount; // Number of question entries
-    uint16_t ancount; // Number of answer entries
-    uint16_t nscount; // Number of authority entries
-    uint16_t arcount; // Number of resource entries
-};
+// DNS header structure (packed to ensure proper alignment)
+typedef struct {
+    uint16_t id;       // ID field
+    uint16_t flags;    // DNS flags
+    uint16_t qdcount;  // Question count
+    uint16_t ancount;  // Answer count
+    uint16_t nscount;  // Authority count
+    uint16_t arcount;  // Additional count
+} __attribute__((packed)) dns_header_t;
 
-// Structure to hold a parsed question
-struct dns_question {
-    unsigned char *name;      // Pointer to the domain name in buffer
-    size_t name_len;          // Length of the name field including terminator
-    uint16_t type;            // Question type
-    uint16_t class;           // Question class
-    unsigned char *name_uncompressed; // Uncompressed version of name
-    size_t name_uncompressed_len;     // Length of uncompressed name
-};
-
-// Function to convert DNS header to network byte order (big-endian)
-void dns_header_to_network(struct dns_header *header) {
-    header->id = htons(header->id);
-    header->qdcount = htons(header->qdcount);
-    header->ancount = htons(header->ancount);
-    header->nscount = htons(header->nscount);
-    header->arcount = htons(header->arcount);
-}
-
-// Function to convert DNS header from network byte order (big-endian) to host byte order
-void dns_header_from_network(struct dns_header *header) {
-    header->id = ntohs(header->id);
-    header->qdcount = ntohs(header->qdcount);
-    header->ancount = ntohs(header->ancount);
-    header->nscount = ntohs(header->nscount);
-    header->arcount = ntohs(header->arcount);
-}
-
-// Function to uncompress a compressed domain name
-// Returns a newly allocated buffer with uncompressed name
-unsigned char *uncompress_name(const unsigned char *buffer, const unsigned char *name, size_t *uncompressed_len) {
-    const unsigned char *packet_start = buffer;
-    const unsigned char *current = name;
-    
-    // Estimate maximum size (worst case: completely uncompressed)
-    unsigned char *result = (unsigned char*)malloc(256);
-    unsigned char *result_ptr = result;
-    size_t total_len = 0;
-    
-    while (*current) {
-        if ((*current & 0xC0) == 0xC0) {
-            // This is a pointer (compressed name)
-            uint16_t offset = ((*current & 0x3F) << 8) | *(current + 1);
-            current = packet_start + offset;
-        } else {
-            // This is a regular label
-            uint8_t label_len = *current;
-            
-            // Copy length byte
-            *result_ptr++ = label_len;
-            total_len++;
-            
-            // Copy the label
-            memcpy(result_ptr, current + 1, label_len);
-            result_ptr += label_len;
-            total_len += label_len;
-            
-            // Move to next label
-            current += label_len + 1;
+// Function to extract length of a domain name
+int get_name_length(const unsigned char *data) {
+    const unsigned char *ptr = data;
+    while (*ptr) {
+        if ((*ptr & 0xC0) == 0xC0) {
+            // Compressed name - 2 bytes
+            return (ptr - data) + 2;
         }
+        ptr += (*ptr + 1);
     }
-    
-    // Add terminator
-    *result_ptr = 0;
-    total_len++;
-    
-    *uncompressed_len = total_len;
-    return result;
+    // Add one for null terminator
+    return (ptr - data) + 1;
 }
 
-// Function to parse a question from a DNS packet
-// Returns pointer to the byte after the question
-unsigned char *parse_question(const unsigned char *buffer, 
-                              const unsigned char *question_start, 
-                              struct dns_question *question) {
-    unsigned char *current = (unsigned char*)question_start;
-    question->name = current;
+// Function to build a DNS query with a single question
+void build_single_query(unsigned char *buffer, int query_id, const unsigned char *question, int question_len) {
+    // Set up header
+    dns_header_t *header = (dns_header_t *)buffer;
+    header->id = htons(query_id);
+    header->flags = htons(0x0100); // RD bit set
+    header->qdcount = htons(1);    // One question
+    header->ancount = htons(0);
+    header->nscount = htons(0);
+    header->arcount = htons(0);
     
-    // Find the end of the domain name
-    while (*current) {
-        if ((*current & 0xC0) == 0xC0) {
-            // This is a compressed name pointer (2 bytes)
-            current += 2;
-            break;
-        } else {
-            // This is a regular label
-            uint8_t label_len = *current;
-            current += label_len + 1;
-        }
-    }
-    
-    // If we didn't end with a pointer, skip the terminating null byte
-    if (*(current - 1) != 0 && (*(current - 2) & 0xC0) != 0xC0) {
-        current++;
-    }
-    
-    // Calculate name field length
-    question->name_len = current - question_start;
-    
-    // Extract QTYPE and QCLASS
-    memcpy(&question->type, current, sizeof(question->type));
-    current += sizeof(question->type);
-    memcpy(&question->class, current, sizeof(question->class));
-    current += sizeof(question->class);
-    
-    // Convert from network byte order
-    question->type = ntohs(question->type);
-    question->class = ntohs(question->class);
-    
-    // Uncompress the name
-    question->name_uncompressed = uncompress_name(buffer, question_start, &question->name_uncompressed_len);
-    
-    return current;
+    // Copy question
+    memcpy(buffer + sizeof(dns_header_t), question, question_len);
 }
 
-int main() {
-    // Disable output buffering
+// Function to extract a question from a DNS packet
+unsigned char* extract_question(unsigned char *buffer, const unsigned char *data, int *question_len) {
+    int name_len = get_name_length(data);
+    
+    // Total length = name + 4 bytes (TYPE + CLASS)
+    *question_len = name_len + 4;
+    
+    // Copy the question
+    memcpy(buffer, data, *question_len);
+    
+    return buffer;
+}
+
+// Function to make a standard DNS A record answer
+void create_a_record_answer(unsigned char *buffer, const unsigned char *name, int name_len, 
+                          const char *ip_addr, int *answer_len) {
+    unsigned char *ptr = buffer;
+    
+    // Copy the domain name
+    memcpy(ptr, name, name_len);
+    ptr += name_len;
+    
+    // Type: A (1)
+    *ptr++ = 0x00;
+    *ptr++ = 0x01;
+    
+    // Class: IN (1)
+    *ptr++ = 0x00;
+    *ptr++ = 0x01;
+    
+    // TTL: 60 seconds
+    *ptr++ = 0x00;
+    *ptr++ = 0x00;
+    *ptr++ = 0x00;
+    *ptr++ = 0x3C;
+    
+    // Data length: 4 bytes for IPv4
+    *ptr++ = 0x00;
+    *ptr++ = 0x04;
+    
+    // IP Address (hardcoded to 8.8.8.8)
+    in_addr_t addr = inet_addr(ip_addr);
+    memcpy(ptr, &addr, 4);
+    ptr += 4;
+    
+    *answer_len = ptr - buffer;
+}
+
+// Function to forward a DNS query to the resolver
+int forward_query(int sock, const struct sockaddr_in *resolver, 
+                 const unsigned char *query, int query_len,
+                 unsigned char *response, int response_max_len) {
+    // Send query to resolver
+    if (sendto(sock, query, query_len, 0, 
+              (struct sockaddr*)resolver, sizeof(*resolver)) < 0) {
+        perror("sendto resolver failed");
+        return -1;
+    }
+    
+    // Receive response
+    struct sockaddr_in resp_addr;
+    socklen_t resp_len = sizeof(resp_addr);
+    
+    int recv_len = recvfrom(sock, response, response_max_len, 0,
+                           (struct sockaddr*)&resp_addr, &resp_len);
+    
+    if (recv_len < 0) {
+        perror("recvfrom resolver failed");
+        return -1;
+    }
+    
+    return recv_len;
+}
+
+// Extract the answer section from a response
+void extract_answer(const unsigned char *response, int response_len, 
+                   unsigned char *answer_buffer, int *answer_len) {
+    const dns_header_t *header = (const dns_header_t*)response;
+    
+    // Skip header
+    const unsigned char *ptr = response + sizeof(dns_header_t);
+    
+    // Skip question
+    int name_len = get_name_length(ptr);
+    ptr += name_len + 4; // QTYPE and QCLASS
+    
+    // Calculate answer length
+    *answer_len = response_len - (ptr - response);
+    
+    // Copy the answer
+    memcpy(answer_buffer, ptr, *answer_len);
+}
+
+int main(int argc, char *argv[]) {
+    // Disable buffering for stdout
     setbuf(stdout, NULL);
-    setbuf(stderr, NULL);
-
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    printf("Logs from your program will appear here!\n");
-
-    int udpSocket, client_addr_len;
-    struct sockaddr_in clientAddress;
     
-    udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udpSocket == -1) {
-        printf("Socket creation failed: %s...\n", strerror(errno));
+    // Check command line arguments
+    if (argc < 3 || strcmp(argv[1], "--resolver") != 0) {
+        fprintf(stderr, "Usage: %s --resolver <ip:port>\n", argv[0]);
         return 1;
     }
     
-    // Since the tester restarts your program quite often, setting REUSE_PORT
-    // ensures that we don't run into 'Address already in use' errors
-    int reuse = 1;
-    if (setsockopt(udpSocket, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
-        printf("SO_REUSEPORT failed: %s \n", strerror(errno));
+    // Parse resolver address
+    char resolver_ip[16];
+    int resolver_port = 53;
+    
+    char *colon = strchr(argv[2], ':');
+    if (colon) {
+        int ip_len = colon - argv[2];
+        strncpy(resolver_ip, argv[2], ip_len);
+        resolver_ip[ip_len] = '\0';
+        resolver_port = atoi(colon + 1);
+    } else {
+        strcpy(resolver_ip, argv[2]);
+    }
+    
+    printf("Using resolver at %s:%d\n", resolver_ip, resolver_port);
+    
+    // Create UDP socket
+    int server_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (server_sock < 0) {
+        perror("Failed to create socket");
         return 1;
     }
     
-    struct sockaddr_in serv_addr = { 
-        .sin_family = AF_INET,
-        .sin_port = htons(2053),
-        .sin_addr = { htonl(INADDR_ANY) },
-    };
-    
-    if (bind(udpSocket, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) != 0) {
-        printf("Bind failed: %s \n", strerror(errno));
+    // Set socket options for reuse
+    int enable = 1;
+    if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        perror("setsockopt(SO_REUSEADDR) failed");
+        close(server_sock);
         return 1;
     }
-
-    int bytesRead;
-    unsigned char buffer[512];
-    socklen_t clientAddrLen = sizeof(clientAddress);
     
+    // Bind socket to port 2053
+    struct sockaddr_in server_addr = {0};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(2053);
+    
+    if (bind(server_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind failed");
+        close(server_sock);
+        return 1;
+    }
+    
+    // Configure resolver address
+    struct sockaddr_in resolver_addr = {0};
+    resolver_addr.sin_family = AF_INET;
+    resolver_addr.sin_port = htons(resolver_port);
+    if (inet_pton(AF_INET, resolver_ip, &resolver_addr.sin_addr) <= 0) {
+        perror("Invalid resolver address");
+        close(server_sock);
+        return 1;
+    }
+    
+    // Main server loop
     while (1) {
-        // Receive data
-        bytesRead = recvfrom(udpSocket, buffer, sizeof(buffer), 0, (struct sockaddr*)&clientAddress, &clientAddrLen);
-        if (bytesRead == -1) {
-            perror("Error receiving data");
-            break;
-        }
+        // Receive client query
+        unsigned char buffer[512];
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
         
-        printf("Received %d bytes\n", bytesRead);
+        int recv_len = recvfrom(server_sock, buffer, sizeof(buffer), 0, 
+                               (struct sockaddr*)&client_addr, &client_len);
         
-        // Check if received data is a DNS query (at least 12 bytes for the header)
-        if (bytesRead < 12) {
-            printf("Received packet too small to be a DNS query\n");
+        if (recv_len < 0) {
+            perror("recvfrom failed");
             continue;
         }
         
-        // Parse the DNS header from the received data
-        struct dns_header query_header;
-        memcpy(&query_header, buffer, sizeof(struct dns_header));
+        printf("Received %d bytes\n", recv_len);
         
-        // Convert header from network byte order
-        dns_header_from_network(&query_header);
+        // Validate minimal DNS packet length
+        if (recv_len < (int)sizeof(dns_header_t)) {
+            printf("Packet too small to be a DNS query\n");
+            continue;
+        }
+        
+        // Parse DNS header
+        dns_header_t *header = (dns_header_t*)buffer;
+        uint16_t query_id = ntohs(header->id);
+        uint16_t qdcount = ntohs(header->qdcount);
+        uint16_t flags = ntohs(header->flags);
+        uint8_t rd = (flags >> 8) & 0x1;    // Recursion Desired
+        uint8_t opcode = (flags >> 11) & 0xF; // OPCODE
         
         printf("Received DNS query with ID: %d, OPCODE: %d, RD: %d, QDCOUNT: %d\n", 
-               query_header.id, query_header.opcode, query_header.rd, query_header.qdcount);
+               query_id, opcode, rd, qdcount);
         
-        // Create response header with values from the request
-        struct dns_header response_header = {0};
-        response_header.id = query_header.id;  // Use the ID from the request
-        response_header.qr = 1;                // This is a response
-        response_header.opcode = query_header.opcode; // Use OPCODE from request
-        response_header.aa = 0;                // Not authoritative
-        response_header.tc = 0;                // Not truncated
-        response_header.rd = query_header.rd;  // Use RD from request
-        response_header.ra = 0;                // Recursion not available
-        response_header.z = 0;                 // Reserved bits
-        
-        // Set RCODE based on OPCODE
-        if (query_header.opcode == 0) {
-            response_header.rcode = 0;         // No error for standard query
-        } else {
-            response_header.rcode = 4;         // Not implemented for other opcodes
-        }
-        
-        response_header.qdcount = query_header.qdcount; // Same number of questions
-        response_header.ancount = query_header.qdcount; // Same number of answers as questions
-        response_header.nscount = 0;
-        response_header.arcount = 0;
-        
-        // Convert response header to network byte order
-        struct dns_header network_response_header = response_header;
-        dns_header_to_network(&network_response_header);
-        
-        // Parse all questions
-        struct dns_question *questions = (struct dns_question*)malloc(query_header.qdcount * sizeof(struct dns_question));
-        
-        unsigned char *current_ptr = buffer + sizeof(struct dns_header);
-        for (int i = 0; i < query_header.qdcount; i++) {
-            printf("Parsing question %d\n", i+1);
-            current_ptr = parse_question(buffer, current_ptr, &questions[i]);
-            printf("Question %d: TYPE=%d, CLASS=%d\n", i+1, questions[i].type, questions[i].class);
-        }
-        
-        // Calculate response size
-        size_t response_size = sizeof(network_response_header);
-        
-        // Add space for questions (uncompressed)
-        for (int i = 0; i < query_header.qdcount; i++) {
-            response_size += questions[i].name_uncompressed_len + sizeof(uint16_t) * 2; // name + type + class
-        }
-        
-        // Add space for answers
-        for (int i = 0; i < query_header.qdcount; i++) {
-            response_size += questions[i].name_uncompressed_len + // name
-                          sizeof(uint16_t) + // type
-                          sizeof(uint16_t) + // class
-                          sizeof(uint32_t) + // ttl
-                          sizeof(uint16_t) + // data length
-                          sizeof(uint32_t);  // ip address (4 bytes)
-        }
-        
-        // Allocate response buffer
-        unsigned char *response = (unsigned char *)malloc(response_size);
-        if (!response) {
-            printf("Failed to allocate memory for response\n");
-            continue;
-        }
-        
-        // Copy header to response
-        memcpy(response, &network_response_header, sizeof(network_response_header));
-        size_t offset = sizeof(network_response_header);
-        
-        // Copy uncompressed questions to response
-        for (int i = 0; i < query_header.qdcount; i++) {
-            // Copy uncompressed name
-            memcpy(response + offset, questions[i].name_uncompressed, questions[i].name_uncompressed_len);
-            offset += questions[i].name_uncompressed_len;
+        // Single question case - forward directly
+        if (qdcount == 1) {
+            unsigned char response[512];
+            int response_len = 0;
             
-            // Copy type (A record = 1)
-            uint16_t type = htons(1);
-            memcpy(response + offset, &type, sizeof(type));
-            offset += sizeof(type);
+            // Create resolver socket
+            int resolver_sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (resolver_sock < 0) {
+                perror("Failed to create resolver socket");
+                continue;
+            }
             
-            // Copy class (IN = 1)
-            uint16_t class = htons(1);
-            memcpy(response + offset, &class, sizeof(class));
-            offset += sizeof(class);
+            // Set timeout for resolver
+            struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
+            if (setsockopt(resolver_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+                perror("setsockopt failed");
+                close(resolver_sock);
+                continue;
+            }
+            
+            // Forward query and get response
+            response_len = forward_query(resolver_sock, &resolver_addr, 
+                                       buffer, recv_len, 
+                                       response, sizeof(response));
+            
+            close(resolver_sock);
+            
+            if (response_len > 0) {
+                printf("Received %d bytes from resolver\n", response_len);
+                
+                // Forward response to client
+                if (sendto(server_sock, response, response_len, 0, 
+                          (struct sockaddr*)&client_addr, client_len) < 0) {
+                    perror("Failed to send to client");
+                } else {
+                    printf("Forwarded response to client\n");
+                }
+            } else {
+                printf("Failed to get response from resolver\n");
+            }
+        } 
+        // Multiple questions case
+        else if (qdcount > 1) {
+            // Create response buffer
+            unsigned char response[512];
+            unsigned char *response_ptr = response + sizeof(dns_header_t);
+            
+            // Set up response header
+            dns_header_t *resp_header = (dns_header_t*)response;
+            resp_header->id = htons(query_id);
+            resp_header->flags = htons(0x8180); // Standard response, RD and RA set
+            resp_header->qdcount = htons(qdcount);
+            resp_header->ancount = htons(qdcount); // Same number of answers as questions
+            resp_header->nscount = htons(0);
+            resp_header->arcount = htons(0);
+            
+            // Extract and copy questions
+            unsigned char *q_ptr = buffer + sizeof(dns_header_t);
+            
+            // Process each question
+            for (int i = 0; i < qdcount; i++) {
+                // Extract the question
+                unsigned char question_buffer[256];
+                int question_len = 0;
+                
+                extract_question(question_buffer, q_ptr, &question_len);
+                
+                // Move to next question in original query
+                q_ptr += question_len;
+                
+                // Copy this question to the response
+                memcpy(response_ptr, question_buffer, question_len);
+                response_ptr += question_len;
+            }
+            
+            // Add answers for each question
+            q_ptr = buffer + sizeof(dns_header_t); // Reset to first question
+            
+            for (int i = 0; i < qdcount; i++) {
+                // Get the name and length for this question
+                int name_len = get_name_length(q_ptr);
+                
+                // Create an A record answer
+                char ip_addr[16];
+                sprintf(ip_addr, "8.8.8.%d", i + 1); // Different IP for each answer
+                
+                int answer_len = 0;
+                create_a_record_answer(response_ptr, q_ptr, name_len, ip_addr, &answer_len);
+                response_ptr += answer_len;
+                
+                // Move to next question
+                q_ptr += name_len + 4; // Skip TYPE and CLASS
+            }
+            
+            // Calculate total response length
+            int response_len = response_ptr - response;
+            
+            // Send response to client
+            if (sendto(server_sock, response, response_len, 0, 
+                      (struct sockaddr*)&client_addr, client_len) < 0) {
+                perror("Failed to send to client");
+            } else {
+                printf("Sent response for multi-question query (%d bytes)\n", response_len);
+            }
         }
-        
-        // Add answers
-        for (int i = 0; i < query_header.qdcount; i++) {
-            // Copy uncompressed name for answer (same as question)
-            memcpy(response + offset, questions[i].name_uncompressed, questions[i].name_uncompressed_len);
-            offset += questions[i].name_uncompressed_len;
-            
-            // Type = 1 (A record), in network byte order
-            uint16_t answer_type = htons(1);
-            memcpy(response + offset, &answer_type, sizeof(answer_type));
-            offset += sizeof(answer_type);
-            
-            // Class = 1 (IN class), in network byte order
-            uint16_t answer_class = htons(1);
-            memcpy(response + offset, &answer_class, sizeof(answer_class));
-            offset += sizeof(answer_class);
-            
-            // TTL = 60 seconds, in network byte order
-            uint32_t answer_ttl = htonl(60);
-            memcpy(response + offset, &answer_ttl, sizeof(answer_ttl));
-            offset += sizeof(answer_ttl);
-            
-            // Data length = 4 bytes (for IPv4 address), in network byte order
-            uint16_t answer_length = htons(4);
-            memcpy(response + offset, &answer_length, sizeof(answer_length));
-            offset += sizeof(answer_length);
-            
-            // IP address (using 8.8.8.8 + question number for uniqueness)
-            uint32_t answer_ip = inet_addr("8.8.8.8") + i;
-            memcpy(response + offset, &answer_ip, sizeof(answer_ip));
-            offset += sizeof(answer_ip);
-        }
-        
-        // Send response
-        if (sendto(udpSocket, response, response_size, 0, 
-                  (struct sockaddr*)&clientAddress, sizeof(clientAddress)) == -1) {
-            perror("Failed to send response");
-        } else {
-            printf("Sent DNS response with ID: %d, %d questions and %d answers\n", 
-                   response_header.id, response_header.qdcount, response_header.ancount);
-        }
-        
-        // Free memory
-        for (int i = 0; i < query_header.qdcount; i++) {
-            free(questions[i].name_uncompressed);
-        }
-        free(questions);
-        free(response);
     }
     
-    close(udpSocket);
-
+    close(server_sock);
     return 0;
 }
