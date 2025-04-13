@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/time.h> /* Add this for struct timeval */
 
 // DNS header structure (packed to ensure proper alignment)
 typedef struct {
@@ -123,7 +124,7 @@ int forward_query(int sock, const struct sockaddr_in *resolver,
 // Extract the answer section from a response
 void extract_answer(const unsigned char *response, int response_len, 
                    unsigned char *answer_buffer, int *answer_len) {
-    const dns_header_t *header = (const dns_header_t*)response;
+    // Removed unused variable: const dns_header_t *header = (const dns_header_t*)response;
     
     // Skip header
     const unsigned char *ptr = response + sizeof(dns_header_t);
@@ -248,8 +249,11 @@ int main(int argc, char *argv[]) {
                 continue;
             }
             
-            // Set timeout for resolver
-            struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
+            // Set timeout for resolver using struct timeval
+            struct timeval tv;
+            tv.tv_sec = 5;
+            tv.tv_usec = 0;
+            
             if (setsockopt(resolver_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
                 perror("setsockopt failed");
                 close(resolver_sock);
